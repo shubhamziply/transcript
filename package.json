@@ -14,7 +14,7 @@
 		"@fontsource-variable/geist": "^5.2.9",
 		"@ricky0123/vad-web": "^0.0.30",
 		"@tailwindcss/vite": "^4.3.0",
-		"@tavali-ai/shared-utils": "^0.16.10",
+		"@tavali-ai/shared-utils": "^0.17.0",
 		"class-variance-authority": "^0.7.1",
 		"clsx": "^2.1.1",
 		"lucide-react": "^1.16.0",
