@@ -31,3 +31,9 @@ AGENTS.md
 .cursor/mcp.jsonc
 .cursor/mcp.jsonc
 .env
+
+# WASM/ONNX files copied from node_modules by scripts/copy-wasm.js
+public/*.mjs
+public/*.wasm
+public/*.onnx
+public/vad.worklet.bundle.min.js
