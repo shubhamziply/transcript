@@ -30,4 +30,4 @@ AGENTS.md
 .cursor/mcp.json
 .cursor/mcp.jsonc
 .cursor/mcp.jsonc
-.npmrc
+.env
