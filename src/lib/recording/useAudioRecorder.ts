@@ -1,59 +1,53 @@
 import { MicVAD } from "@ricky0123/vad-web";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { transcribeChunk } from "./backend";
-import type {
-	AudioChunk,
-	RecorderError,
-	RecorderStatus,
-	TranscribedChunk,
-} from "./types";
+import { useTranscriptStore } from "@/store/useTranscriptStore";
+import { finalizeTranscription, transcribeChunkViaService } from "./backend";
+import type { AudioChunk, RecorderError, RecorderStatus } from "./types";
 import { float32ToInt16PCM } from "./wav";
 
 const VAD_SAMPLE_RATE = 16000;
 
-export interface UseAudioRecorderOptions {
-	endpoint?: string;
-	onTranscribed?: (result: TranscribedChunk) => void;
+const SPEAKER_LABEL_RE = /^spk_\d+$/;
+
+function parseTranscript(transcript: string): Array<{ speaker: string; text: string }> {
+	// Split on 2+ whitespace that precedes a speaker label (spk_0:, spk_1:, etc.)
+	const parts = transcript.split(/\s{2,}(?=spk_\d+:)/);
+	return parts
+		.map((part) => {
+			const colonIdx = part.indexOf(": ");
+			if (colonIdx !== -1) {
+				const speaker = part.slice(0, colonIdx).trim();
+				if (SPEAKER_LABEL_RE.test(speaker)) {
+					return { speaker, text: part.slice(colonIdx + 2).trim() };
+				}
+			}
+			return { speaker: "spk_0", text: part.trim() };
+		})
+		.filter((s) => s.text.length > 0);
 }
 
 export interface UseAudioRecorderResult {
 	status: RecorderStatus;
 	error: RecorderError | null;
 	isSpeechActive: boolean;
-	chunks: TranscribedChunk[];
 	pendingCount: number;
 	start: () => Promise<void>;
 	stop: () => Promise<void>;
+	finalize: () => Promise<void>;
 	reset: () => void;
 }
 
-export function useAudioRecorder(
-	options: UseAudioRecorderOptions = {},
-): UseAudioRecorderResult {
-	const { endpoint, onTranscribed } = options;
-
+export function useAudioRecorder(): UseAudioRecorderResult {
 	const [status, setStatus] = useState<RecorderStatus>("idle");
 	const [error, setError] = useState<RecorderError | null>(null);
 	const [isSpeechActive, setIsSpeechActive] = useState(false);
-	const [chunks, setChunks] = useState<TranscribedChunk[]>([]);
 	const [pendingCount, setPendingCount] = useState(0);
-
-	console.log({ pendingCount, chunks });
 
 	const vadRef = useRef<MicVAD | null>(null);
 	const sessionStartRef = useRef<number>(0);
 	const speechStartRef = useRef<number>(0);
-	const abortRef = useRef<AbortController | null>(null);
-
-	const onTranscribedRef = useRef(onTranscribed);
-	useEffect(() => {
-		onTranscribedRef.current = onTranscribed;
-	}, [onTranscribed]);
-
-	const endpointRef = useRef(endpoint);
-	useEffect(() => {
-		endpointRef.current = endpoint;
-	}, [endpoint]);
+	const chunkNumberRef = useRef(1);
+	const chunkTimingsRef = useRef<Map<number, number>>(new Map());
 
 	const handleSpeechEnd = useCallback((audio: Float32Array) => {
 		const now = performance.now();
@@ -66,29 +60,37 @@ export function useAudioRecorder(
 			startedAtMs: speechStartRef.current - sessionStartRef.current,
 			durationMs,
 		};
-		console.log("audio chunk", float32ToInt16PCM(audio));
 
-		console.log(
-			`[VAD] 🔇 Speech ended — ${(durationMs / 1000).toFixed(2)}s, ${audio.length} samples, chunk id: ${chunk.id}`,
-		);
 		setIsSpeechActive(false);
+
+		const { chairsideId, addChunk } = useTranscriptStore.getState();
+		if (!chairsideId) return;
+
 		setPendingCount((c) => c + 1);
 
-		const controller = abortRef.current;
-		transcribeChunk(chunk, {
-			endpoint: endpointRef.current,
-			signal: controller?.signal,
-		})
+		const chunkNumber = chunkNumberRef.current++;
+		chunkTimingsRef.current.set(chunkNumber, chunk.startedAtMs);
+
+		transcribeChunkViaService(chunk, chairsideId, chunkNumber)
 			.then((result) => {
-				console.log(
-					`[Transcribe] ✅ ${result.speaker}: "${result.text}" (${(result.durationMs / 1000).toFixed(2)}s)`,
-				);
-				setChunks((prev) => [...prev, result]);
-				onTranscribedRef.current?.(result);
+				// Discard if the session changed while this request was in flight
+				if (useTranscriptStore.getState().chairsideId !== chairsideId) return;
+				if (!result.transcript) return;
+				const segments = parseTranscript(result.transcript);
+				const startedAtMs =
+					chunkTimingsRef.current.get(result.chunk_number - 1) ?? 0;
+				for (const [i, { speaker, text }] of segments.entries()) {
+					addChunk({
+						chunkId: `${result.chunk_number}-${i}`,
+						speaker,
+						text,
+						startedAtMs,
+						durationMs: chunk.durationMs,
+					});
+				}
 			})
 			.catch((err) => {
-				if (err instanceof DOMException && err.name === "AbortError") return;
-				console.error("[Transcribe] ❌ Failed to transcribe chunk", err);
+				console.error("[Transcribe] Failed to transcribe chunk", err);
 			})
 			.finally(() => {
 				setPendingCount((c) => Math.max(0, c - 1));
@@ -100,7 +102,6 @@ export function useAudioRecorder(
 		setError(null);
 		setStatus("loading");
 		try {
-			abortRef.current = new AbortController();
 			sessionStartRef.current = performance.now();
 			const vad = await MicVAD.new({
 				model: "v5",
@@ -109,18 +110,15 @@ export function useAudioRecorder(
 				onSpeechStart: () => {
 					speechStartRef.current = performance.now();
 					setIsSpeechActive(true);
-					console.log("[VAD] 🎙️ Speech started");
 				},
 				onSpeechEnd: handleSpeechEnd,
 				onVADMisfire: () => {
 					setIsSpeechActive(false);
-					console.log("[VAD] ⚡ Misfire (too short, ignored)");
 				},
 			});
 			vadRef.current = vad;
 			await vad.start();
 			setStatus("recording");
-			console.log("[Recorder] ▶️ Recording started — speak to generate chunks");
 		} catch (err) {
 			const isPermission =
 				err instanceof DOMException &&
@@ -137,36 +135,43 @@ export function useAudioRecorder(
 		const vad = vadRef.current;
 		if (!vad) return;
 		vadRef.current = null;
-		abortRef.current?.abort();
-		abortRef.current = null;
 		await vad.destroy();
 		setIsSpeechActive(false);
 		setStatus("idle");
-		console.log("[Recorder] ⏹️ Recording stopped");
+	}, []);
+
+	const finalize = useCallback(async () => {
+		const { chairsideId, addChunk } = useTranscriptStore.getState();
+		if (!chairsideId) return;
+		const chunkNumber = chunkNumberRef.current++;
+		const result = await finalizeTranscription(chairsideId, chunkNumber);
+		if (!result.transcript) return;
+		const segments = parseTranscript(result.transcript);
+		const startedAtMs = chunkTimingsRef.current.get(result.chunk_number - 1) ?? 0;
+		for (const [i, { speaker, text }] of segments.entries()) {
+			addChunk({
+				chunkId: `${result.chunk_number}-${i}`,
+				speaker,
+				text,
+				startedAtMs,
+				durationMs: 0,
+			});
+		}
 	}, []);
 
 	const reset = useCallback(() => {
-		setChunks([]);
 		setPendingCount(0);
 		setError(null);
+		chunkNumberRef.current = 1;
+		chunkTimingsRef.current.clear();
 	}, []);
 
 	useEffect(() => {
 		return () => {
 			vadRef.current?.destroy();
 			vadRef.current = null;
-			abortRef.current?.abort();
 		};
 	}, []);
 
-	return {
-		status,
-		error,
-		isSpeechActive,
-		chunks,
-		pendingCount,
-		start,
-		stop,
-		reset,
-	};
+	return { status, error, isSpeechActive, pendingCount, start, stop, finalize, reset };
 }

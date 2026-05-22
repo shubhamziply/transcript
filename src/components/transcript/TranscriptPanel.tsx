@@ -1,4 +1,7 @@
+import { StatusCode } from "@tavali-ai/shared-utils/enums";
+import { startEncounter } from "@tavali-ai/shared-utils/service";
 import { useEffect, useRef, useState } from "react";
+import { v4 as uuidv4 } from "uuid";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type {
 	RecorderError,
@@ -7,8 +10,9 @@ import type {
 } from "@/lib/recording/types";
 import { useAudioRecorder } from "@/lib/recording/useAudioRecorder";
 import { cn } from "@/lib/utils";
+import { useTranscriptStore } from "@/store/useTranscriptStore";
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Entity types & styles ────────────────────────────────────────────────────
 
 type EntityType = "tooth" | "tooth-ref" | "surface" | "procedure";
 
@@ -18,21 +22,6 @@ interface DetectedEntity {
 	code?: string;
 	type: EntityType;
 }
-
-interface TextSegment {
-	text: string;
-	entityType?: EntityType;
-}
-
-interface TranscriptMessage {
-	id: string;
-	speaker: "doctor" | "patient";
-	speakerName: string;
-	time: string;
-	segments: TextSegment[];
-}
-
-// ── Style map ────────────────────────────────────────────────────────────────
 
 const entityStyles: Record<
 	EntityType,
@@ -60,65 +49,7 @@ const entityStyles: Record<
 	},
 };
 
-// ── Static data ──────────────────────────────────────────────────────────────
-
-const MESSAGES: TranscriptMessage[] = [
-	{
-		id: "m1",
-		speaker: "doctor",
-		speakerName: "Dr. Martinez",
-		time: "9:15 AM",
-		segments: [{ text: "Good morning Sarah. How are you feeling today?" }],
-	},
-	{
-		id: "m2",
-		speaker: "patient",
-		speakerName: "Patient",
-		time: "9:15 AM",
-		segments: [
-			{
-				text: "Good morning. I have been having some sensitivity on my upper left side when I eat cold foods.",
-			},
-		],
-	},
-	{
-		id: "m3",
-		speaker: "doctor",
-		speakerName: "Dr. Martinez",
-		time: "9:18 AM",
-		segments: [
-			{ text: "Let me take a look. I see on " },
-			{ text: "tooth fourteen", entityType: "tooth" },
-			{ text: " there is some decay on the " },
-			{ text: "mesial and occlusal", entityType: "surface" },
-			{ text: " surfaces. We will need to do a " },
-			{ text: "crown", entityType: "procedure" },
-			{ text: " to restore this tooth properly." },
-		],
-	},
-	{
-		id: "m4",
-		speaker: "patient",
-		speakerName: "Patient",
-		time: "9:19 AM",
-		segments: [{ text: "Will that be covered by my insurance?" }],
-	},
-	{
-		id: "m5",
-		speaker: "doctor",
-		speakerName: "Dr. Martinez",
-		time: "9:20 AM",
-		segments: [
-			{ text: "Most plans cover about 50% for a " },
-			{ text: "D2750", entityType: "procedure" },
-			{
-				text: " crown. Let me have my front desk check your specific coverage and benefits.",
-			},
-		],
-	},
-];
-
-const INITIAL_ENTITIES: DetectedEntity[] = [
+const STATIC_ENTITIES: DetectedEntity[] = [
 	{ id: "e1", label: "Tooth #14", type: "tooth" },
 	{ id: "e2", label: "MO Surfaces", type: "surface" },
 	{ id: "e3", label: "D2750 Crown PFM", code: "D2750", type: "procedure" },
@@ -148,6 +79,7 @@ interface RecordingBarProps {
 	elapsedSeconds: number;
 	pendingCount: number;
 	error: RecorderError | null;
+	isToggling: boolean;
 	onToggle: () => void;
 }
 
@@ -157,10 +89,12 @@ function RecordingBar({
 	elapsedSeconds,
 	pendingCount,
 	error,
+	isToggling,
 	onToggle,
 }: RecordingBarProps) {
 	const isRecording = status === "recording";
-	const isLoading = status === "loading";
+	const isVadLoading = status === "loading";
+	const isDisabled = isToggling || isVadLoading;
 
 	const hours = String(Math.floor(elapsedSeconds / 3600)).padStart(2, "0");
 	const minutes = String(Math.floor((elapsedSeconds % 3600) / 60)).padStart(
@@ -173,13 +107,17 @@ function RecordingBar({
 		? error.code === "permission"
 			? "Mic blocked"
 			: "Error"
-		: isLoading
-			? "Loading…"
-			: isRecording
-				? isSpeechActive
-					? "Listening"
-					: "Recording"
-				: "Idle";
+		: isToggling
+			? isRecording
+				? "Stopping…"
+				: "Connecting…"
+			: isVadLoading
+				? "Loading…"
+				: isRecording
+					? isSpeechActive
+						? "Listening"
+						: "Recording"
+					: "Idle";
 
 	return (
 		<div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-gray-100 bg-white">
@@ -207,7 +145,7 @@ function RecordingBar({
 			>
 				{label}
 			</span>
-			{isRecording && (
+			{isRecording && !isToggling && (
 				<span className="inline-block size-2 rounded-full bg-red-500 animate-pulse" />
 			)}
 			{pendingCount > 0 && (
@@ -221,7 +159,7 @@ function RecordingBar({
 			<button
 				type="button"
 				onClick={onToggle}
-				disabled={isLoading}
+				disabled={isDisabled}
 				className={cn(
 					"ml-1 flex items-center justify-center rounded-full size-7 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
 					isRecording
@@ -230,7 +168,29 @@ function RecordingBar({
 				)}
 				aria-label={isRecording ? "Stop recording" : "Start recording"}
 			>
-				{isRecording ? (
+				{isToggling ? (
+					<svg
+						className="size-3.5 animate-spin"
+						viewBox="0 0 24 24"
+						fill="none"
+						aria-hidden="true"
+					>
+						<title>Loading</title>
+						<circle
+							className="opacity-25"
+							cx="12"
+							cy="12"
+							r="10"
+							stroke="currentColor"
+							strokeWidth="4"
+						/>
+						<path
+							className="opacity-75"
+							fill="currentColor"
+							d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+						/>
+					</svg>
+				) : isRecording ? (
 					<svg
 						className="size-3"
 						viewBox="0 0 12 12"
@@ -256,50 +216,29 @@ function RecordingBar({
 	);
 }
 
-function InlineEntityChip({ text, type }: { text: string; type: EntityType }) {
-	const s = entityStyles[type];
-	return (
-		<span
-			className={cn(
-				"inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.9em] font-medium leading-snug mx-0.5",
-				s.chip,
-				s.text,
-			)}
-		>
-			{text}
-		</span>
-	);
-}
+function TranscriptItem({ chunk }: { chunk: TranscribedChunk }) {
+	const parsed = parseInt(chunk.speaker.replace(/\D/g, ""), 10);
+	const speakerIndex = Number.isNaN(parsed) ? 0 : parsed;
+	const speakerLabel = `Speaker ${speakerIndex}`;
+	const speakerColor =
+		speakerIndex === 0
+			? "text-blue-600"
+			: speakerIndex === 1
+				? "text-emerald-600"
+				: "text-amber-600";
+	const totalSeconds = Math.floor(chunk.startedAtMs / 1000);
+	const time = `+${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
 
-function MessageItem({ message }: { message: TranscriptMessage }) {
-	const isDoctor = message.speaker === "doctor";
 	return (
 		<div className="px-4 py-4">
 			<div className="flex items-center gap-2 mb-1.5">
-				<span
-					className={cn(
-						"text-sm font-semibold",
-						isDoctor ? "text-blue-600" : "text-gray-400",
-					)}
-				>
-					{message.speakerName}
+				<span className={cn("text-sm font-semibold", speakerColor)}>
+					{speakerLabel}
 				</span>
 				<span className="inline-block size-1.5 rounded-full bg-green-500" />
-				<span className="text-xs text-gray-400">{message.time}</span>
+				<span className="text-xs text-gray-400">{time}</span>
 			</div>
-			<p className="text-[17px] leading-relaxed text-gray-900">
-				{message.segments.map((seg, i) =>
-					seg.entityType ? (
-						<InlineEntityChip
-							key={`seg-${i}-${seg.text}`}
-							text={seg.text}
-							type={seg.entityType}
-						/>
-					) : (
-						<span key={`seg-${i}-${seg.text}`}>{seg.text}</span>
-					),
-				)}
-			</p>
+			<p className="text-[17px] leading-relaxed text-gray-900">{chunk.text}</p>
 		</div>
 	);
 }
@@ -353,43 +292,16 @@ function DetectedEntities({
 	);
 }
 
-function LiveMessageItem({ chunk }: { chunk: TranscribedChunk }) {
-	const speakerNum = parseInt(chunk.speaker.replace(/\D/g, ""), 10) || 1;
-	const speakerColor =
-		speakerNum === 1
-			? "text-blue-600"
-			: speakerNum === 2
-				? "text-emerald-600"
-				: "text-amber-600";
-	const time = formatChunkTime(chunk.startedAtMs);
-	return (
-		<div className="px-4 py-4">
-			<div className="flex items-center gap-2 mb-1.5">
-				<span className={cn("text-sm font-semibold", speakerColor)}>
-					{chunk.speaker}
-				</span>
-				<span className="inline-block size-1.5 rounded-full bg-green-500" />
-				<span className="text-xs text-gray-400">{time}</span>
-			</div>
-			<p className="text-[17px] leading-relaxed text-gray-900">{chunk.text}</p>
-		</div>
-	);
-}
-
-function formatChunkTime(ms: number): string {
-	const totalSeconds = Math.floor(ms / 1000);
-	const m = Math.floor(totalSeconds / 60);
-	const s = totalSeconds % 60;
-	return `+${m}:${String(s).padStart(2, "0")}`;
-}
-
 // ── Panel ────────────────────────────────────────────────────────────────────
 
 export function TranscriptPanel() {
-	const [entities, setEntities] = useState<DetectedEntity[]>(INITIAL_ENTITIES);
 	const [elapsedSeconds, setElapsedSeconds] = useState(0);
+	const [isToggling, setIsToggling] = useState(false);
+	const [encounterError, setEncounterError] = useState<string | null>(null);
+	const [entities, setEntities] = useState<DetectedEntity[]>(STATIC_ENTITIES);
 	const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+	const { chunks, setChairsideId, clearSession } = useTranscriptStore();
 	const recorder = useAudioRecorder();
 	const isRecording = recorder.status === "recording";
 
@@ -399,9 +311,11 @@ export function TranscriptPanel() {
 				() => setElapsedSeconds((s) => s + 1),
 				1000,
 			);
-		} else if (tickRef.current) {
-			clearInterval(tickRef.current);
-			tickRef.current = null;
+		} else {
+			if (tickRef.current) {
+				clearInterval(tickRef.current);
+				tickRef.current = null;
+			}
 		}
 		return () => {
 			if (tickRef.current) {
@@ -411,24 +325,38 @@ export function TranscriptPanel() {
 		};
 	}, [isRecording]);
 
-	const handleToggle = async () => {
-		if (isRecording) {
-			await recorder.stop();
-		} else {
-			setElapsedSeconds(0);
-			recorder.reset();
-			await recorder.start();
-		}
-	};
-
 	const removeEntity = (id: string) =>
 		setEntities((prev) => prev.filter((e) => e.id !== id));
 
-	const showLive = recorder.chunks.length > 0 || isRecording;
+	const handleToggle = async () => {
+		setIsToggling(true);
+		setEncounterError(null);
+		try {
+			if (isRecording) {
+				await recorder.finalize();
+				await recorder.stop();
+			} else {
+				const id = uuidv4();
+				const response = await startEncounter({ chairside_id: id });
+				if (response.status === StatusCode.SuccessOK) {
+					clearSession();
+					recorder.reset();
+					setElapsedSeconds(0);
+					setChairsideId(response.data.chairside_id);
+					await recorder.start();
+				} else {
+					setEncounterError("Failed to start session. Please try again.");
+				}
+			}
+		} catch {
+			setEncounterError("Something went wrong. Please try again.");
+		} finally {
+			setIsToggling(false);
+		}
+	};
 
 	return (
 		<div className="flex flex-col w-[375px] h-full rounded-2xl bg-white shadow-xl overflow-hidden border border-gray-100">
-			{/* Segmented header */}
 			<div className="px-3 py-3 bg-gray-100">
 				<div className="flex rounded-xl bg-gray-200/80 p-1">
 					<button
@@ -446,6 +374,7 @@ export function TranscriptPanel() {
 				elapsedSeconds={elapsedSeconds}
 				pendingCount={recorder.pendingCount}
 				error={recorder.error}
+				isToggling={isToggling}
 				onToggle={handleToggle}
 			/>
 
@@ -456,21 +385,24 @@ export function TranscriptPanel() {
 						: recorder.error.message}
 				</div>
 			)}
+			{encounterError && (
+				<div className="px-4 py-2 bg-red-50 border-b border-red-100 text-xs text-red-700">
+					{encounterError}
+				</div>
+			)}
 
 			<ScrollArea className="h-[400px]">
 				<div className="divide-y divide-gray-50">
-					{showLive ? (
-						recorder.chunks.length === 0 ? (
-							<div className="px-4 py-6 text-center text-sm text-gray-400">
-								Listening… start speaking to see transcript.
-							</div>
-						) : (
-							recorder.chunks.map((chunk) => (
-								<LiveMessageItem key={chunk.chunkId} chunk={chunk} />
-							))
-						)
+					{chunks.length === 0 ? (
+						<div className="px-4 py-6 text-center text-sm text-gray-400">
+							{isRecording
+								? "Listening… start speaking to see transcript."
+								: "Start recording to begin transcript."}
+						</div>
 					) : (
-						MESSAGES.map((msg) => <MessageItem key={msg.id} message={msg} />)
+						chunks.map((chunk) => (
+							<TranscriptItem key={chunk.chunkId} chunk={chunk} />
+						))
 					)}
 				</div>
 			</ScrollArea>

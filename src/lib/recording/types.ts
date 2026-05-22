@@ -16,12 +16,7 @@ export interface TranscribedChunk {
 	durationMs: number;
 }
 
-export type RecorderStatus =
-	| "idle"
-	| "loading"
-	| "ready"
-	| "recording"
-	| "error";
+export type RecorderStatus = "idle" | "loading" | "recording" | "error";
 
 export interface RecorderError {
 	code: "permission" | "load" | "unknown";

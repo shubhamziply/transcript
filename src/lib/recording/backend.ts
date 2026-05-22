@@ -1,85 +1,46 @@
-import type { AudioChunk, SpeakerLabel, TranscribedChunk } from "./types";
+import { StatusCode } from "@tavali-ai/shared-utils/enums";
+import type { TranscribeChunkResponseModel } from "@tavali-ai/shared-utils/models";
+import { transcribeChunk as transcribeChunkApi } from "@tavali-ai/shared-utils/service";
+import type { AudioChunk } from "./types";
 
-export interface TranscribeOptions {
-	endpoint?: string;
-	signal?: AbortSignal;
-}
-
-export async function transcribeChunk(
+export async function transcribeChunkViaService(
 	chunk: AudioChunk,
-	opts: TranscribeOptions = {},
-): Promise<TranscribedChunk> {
-	if (opts.endpoint) {
-		return postChunkToBackend(chunk, opts.endpoint, opts.signal);
-	}
-	return mockTranscribe(chunk);
-}
-
-async function postChunkToBackend(
-	chunk: AudioChunk,
-	endpoint: string,
-	signal?: AbortSignal,
-): Promise<TranscribedChunk> {
-	// Raw PCM: 16-bit signed int, 16000 Hz, mono, little-endian, no header
-	const pcmBlob = new Blob([chunk.audio.buffer as ArrayBuffer], { type: "audio/pcm" });
+	chairsideId: string,
+	chunkNumber: number,
+): Promise<TranscribeChunkResponseModel> {
+	const pcmBlob = new Blob([chunk.audio.buffer as ArrayBuffer], {
+		type: "audio/pcm",
+	});
 	const form = new FormData();
+	form.append("chairside_id", chairsideId);
+	form.append("chunk_number", String(chunkNumber));
+	form.append("is_last", "false");
 	form.append("audio", pcmBlob, `${chunk.id}.pcm`);
-	form.append("chunkId", chunk.id);
-	form.append("startedAtMs", String(chunk.startedAtMs));
-	form.append("durationMs", String(chunk.durationMs));
-	form.append("sampleRate", String(chunk.sampleRate));
 
-	const res = await fetch(endpoint, { method: "POST", body: form, signal });
-	if (!res.ok) {
-		throw new Error(`Transcription failed: ${res.status} ${res.statusText}`);
+	const response = await transcribeChunkApi(form);
+	if (response.status !== StatusCode.SuccessOK) {
+		throw new Error(`Transcription failed: ${response.message}`);
 	}
-	const data = (await res.json()) as {
-		speaker: SpeakerLabel;
-		text: string;
-	};
-	return {
-		chunkId: chunk.id,
-		speaker: data.speaker,
-		text: data.text,
-		startedAtMs: chunk.startedAtMs,
-		durationMs: chunk.durationMs,
-	};
+	return response.data;
 }
 
-const MOCK_PHRASES = [
-	"Good morning, how are you feeling today?",
-	"I've been having some sensitivity on my upper left side.",
-	"Let me take a look at that.",
-	"It's been bothering me for about a week.",
-	"I see some decay on the mesial surface.",
-	"Will my insurance cover this?",
-	"We'll need to do a crown to restore the tooth.",
-	"How long will the procedure take?",
-];
+export async function finalizeTranscription(
+	chairsideId: string,
+	chunkNumber: number,
+): Promise<TranscribeChunkResponseModel> {
+	// Silent 10ms PCM buffer (160 samples × 2 bytes at 16kHz) required by the API
+	const silentAudio = new Int16Array(160);
+	const silentBlob = new Blob([silentAudio.buffer], { type: "audio/pcm" });
 
-async function mockTranscribe(chunk: AudioChunk): Promise<TranscribedChunk> {
-	await new Promise((r) => setTimeout(r, 250 + Math.random() * 400));
-	const speaker = mockSpeakerFromAudio(chunk.audio, chunk.sampleRate);
-	const text = MOCK_PHRASES[Math.floor(Math.random() * MOCK_PHRASES.length)];
-	return {
-		chunkId: chunk.id,
-		speaker,
-		text,
-		startedAtMs: chunk.startedAtMs,
-		durationMs: chunk.durationMs,
-	};
-}
+	const form = new FormData();
+	form.append("chairside_id", chairsideId);
+	form.append("chunk_number", String(chunkNumber));
+	form.append("is_last", "true");
+	form.append("audio", silentBlob, "final.pcm");
 
-function mockSpeakerFromAudio(
-	samples: Int16Array,
-	sampleRate: number,
-): SpeakerLabel {
-	let crossings = 0;
-	for (let i = 1; i < samples.length; i++) {
-		if (samples[i - 1] < 0 !== samples[i] < 0) crossings++;
+	const response = await transcribeChunkApi(form);
+	if (response.status !== StatusCode.SuccessOK) {
+		throw new Error(`Finalize failed: ${response.message}`);
 	}
-	const zcr = crossings / (samples.length / sampleRate);
-	if (zcr < 1500) return "Speaker 1";
-	if (zcr < 2500) return "Speaker 2";
-	return "Speaker 3";
+	return response.data;
 }
