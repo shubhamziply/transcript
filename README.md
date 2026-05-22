@@ -1,5 +1,26 @@
 # React + TypeScript + Vite
 
+## Private dependencies
+
+`@tavali-ai/shared-utils` is hosted on GitHub Packages. Authentication uses `NPM_TOKEN` (see `.npmrc`).
+
+**Local setup**
+
+1. Create a GitHub PAT with the `read:packages` scope.
+2. Copy `.env.example` to `.env` and set `NPM_TOKEN`.
+3. Export the token, then install:
+
+```bash
+export NPM_TOKEN="$(grep '^NPM_TOKEN=' .env | cut -d= -f2-)"
+pnpm install
+```
+
+**Vercel**
+
+In the project **Settings → Environment Variables**, add `NPM_TOKEN` with the same PAT (Production, Preview, and Development). Redeploy after saving.
+
+---
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:
